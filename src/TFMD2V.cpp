@@ -415,6 +415,7 @@ int TFM::D2V_initialize_array(std::vector<int> &array, int &d2vtype, int &frames
         else array[num2++] = (val&~0x10);
       }
       while (*p && *p != ' ' && *p != '\n') p++;
+      if (!*p) break; // Do not advance beyond the terminating NUL.
       p++;
     }
   } while (readD2VLine(ind2v.get(), line) && !line.empty() && isD2VFlagChar(line[0]));
@@ -506,6 +507,7 @@ int TFM::D2V_write_array(const std::vector<int> &array, char wfile[]) const
         *p = tbuf[1];
       }
       while (*p && *p != ' ' && *p != '\n') p++;
+      if (!*p) break; // Do not advance beyond the terminating NUL.
       p++;
     }
     fputs(line.c_str(), outd2v.get());
