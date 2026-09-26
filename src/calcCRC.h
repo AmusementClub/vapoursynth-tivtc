@@ -3,8 +3,8 @@
 **
 **   TIVTC includes a field matching filter (TFM) and a decimation
 **   filter (TDecimate) which can be used together to achieve an
-**   IVTC or for other uses. TIVTC currently supports 8 bit planar YUV and
-**   YUY2 colorspaces.
+**   IVTC or for other uses. TIVTC supports 8-16 bit planar YUV
+**   (4:4:4, 4:2:2 and 4:2:0).
 **
 **   Copyright (C) 2004-2008 Kevin Stone, additional work (C) 2020 pinterf
 **
@@ -23,8 +23,6 @@
 **   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
-//#include <windows.h>
-//#include "internal.h"
-#include <VapourSynth.h>
+#include <VapourSynth4.h>
 
-void calcCRC(VSNodeRef *hclip, int stop, unsigned int& crc, const VSAPI *vsapi);
+void calcCRC(VSNode *hclip, int stop, unsigned int& crc, const VSAPI *vsapi);

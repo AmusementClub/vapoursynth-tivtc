@@ -3,8 +3,8 @@
 **
 **   TIVTC includes a field matching filter (TFM) and a decimation
 **   filter (TDecimate) which can be used together to achieve an
-**   IVTC or for other uses. TIVTC currently supports 8 bit planar YUV and
-**   YUY2 colorspaces.
+**   IVTC or for other uses. TIVTC supports 8-16 bit planar YUV
+**   (4:4:4, 4:2:2 and 4:2:0).
 **
 **   Copyright (C) 2004-2008 Kevin Stone, additional work (C) 2020 pinterf
 **
@@ -23,7 +23,6 @@
 **   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
-//#include "internal.h"
 #include "calcCRC.h"
 
 static const unsigned int Crc32Table[256] =
@@ -94,20 +93,22 @@ static const unsigned int Crc32Table[256] =
   0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D,
 };
 
-void calcCRC(VSNodeRef *hclip, int stop, unsigned int &crc, const VSAPI *vsapi)
+void calcCRC(VSNode *hclip, int stop, unsigned int &crc, const VSAPI *vsapi)
 {
   crc = 0xFFFFFFFF;
-  const VSFrameRef *src;
+  const VSFrame *src;
   const unsigned int *ptrCrcTable = Crc32Table;
   const uint8_t *buffer;
-  int width, height, pitch, modulo, x;
+  int width, height, x;
+  ptrdiff_t pitch, modulo;
   const VSVideoInfo *vi2 = vsapi->getVideoInfo(hclip);
   if (stop > vi2->numFrames) stop = vi2->numFrames;
   for (x = 0; x < stop; ++x)
   {
     src = vsapi->getFrame(x, hclip, nullptr, 0);
+    if (src == nullptr) break; // upstream render failure: abort CRC (caller will report a mismatch)
     buffer = vsapi->getReadPtr(src, 0);
-    width = vsapi->getFrameWidth(src, 0) * vsapi->getFrameFormat(src)->bytesPerSample;
+    width = vsapi->getFrameWidth(src, 0) * vsapi->getVideoFrameFormat(src)->bytesPerSample;
     pitch = vsapi->getStride(src, 0);
     height = vsapi->getFrameHeight(src, 0);
     modulo = pitch - width;
@@ -117,7 +118,6 @@ void calcCRC(VSNodeRef *hclip, int stop, unsigned int &crc, const VSAPI *vsapi)
         crc = ptrCrcTable[(crc ^ *buffer++) & 0xFF] ^ (crc >> 8);
       buffer += modulo;
     }
-    //crc = crc ^ ~0U;
     vsapi->freeFrame(src);
   }
 }

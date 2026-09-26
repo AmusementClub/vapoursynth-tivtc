@@ -3,8 +3,8 @@
 **
 **   TIVTC includes a field matching filter (TFM) and a decimation
 **   filter (TDecimate) which can be used together to achieve an
-**   IVTC or for other uses. TIVTC currently supports 8 bit planar YUV and
-**   YUY2 colorspaces.
+**   IVTC or for other uses. TIVTC supports 8-16 bit planar YUV
+**   (4:4:4, 4:2:2 and 4:2:0).
 **
 **   Copyright (C) 2004-2008 Kevin Stone, additional work (C) 2020 pinterf
 **
@@ -27,7 +27,7 @@
 #include <algorithm>
 
 
-const VSFrameRef * TDecimate::GetFrameMode2(int n, int activationReason, void **frameData, VSFrameContext *frameCtx, VSCore *core)
+const VSFrame * TDecimate::GetFrameMode2(int n, int activationReason, void **frameData, VSFrameContext *frameCtx, VSCore *core)
 {
     if (activationReason != arInitial && activationReason != arAllFramesReady)
         return nullptr;
@@ -44,28 +44,30 @@ const VSFrameRef * TDecimate::GetFrameMode2(int n, int activationReason, void **
         break;
       }
     }
+    // Rounding between the output frame count and the per-cycle drop totals can leave the
+    // last output frame(s) uncovered by any cycle, leaving cycleF at its -20 sentinel; clamp
+    // to the final cycle instead of indexing aLUT with a large negative value.
+    if (cycleF == -20) cycleF = mode2_numCycles - 1;
 
     if (activationReason == arInitial) {
-        if (cycleF > 0) {
-            int start = aLUT[(cycleF - 1) * 5] - 1;
-            int end = start + curr.length;
+        // calcMetricCycle() walks frames [first, first + length) of a cycle and reads each frame
+        // together with its predecessor, so a cycle needs length + 1 frames starting one before
+        // it. Requesting only `length` of them left the cycle's last frame unrequested, and
+        // getFrameFilter() returns NULL for anything that was not requested.
+        auto requestCycle = [&](int firstFrame) {
+            const int start = firstFrame - 1;
+            const int end = start + curr.length + 1;
             for (int i = start; i < end; i++)
                 vsapi->requestFrameFilter(std::max(0, std::min(i, vi_child->numFrames - 1)), child, frameCtx);
-        }
+        };
 
-        {
-            int start = aLUT[cycleF * 5] - 1;
-            int end = start + curr.length;
-            for (int i = start; i < end; i++)
-                vsapi->requestFrameFilter(std::max(0, std::min(i, vi_child->numFrames - 1)), child, frameCtx);
-        }
+        if (cycleF > 0)
+            requestCycle(aLUT[(cycleF - 1) * 5]);
 
-        if (cycleF < mode2_numCycles - 1) {
-            int start = aLUT[(cycleF + 1) * 5] - 1;
-            int end = start + curr.length;
-            for (int i = start; i < end; i++)
-                vsapi->requestFrameFilter(std::max(0, std::min(i, vi_child->numFrames - 1)), child, frameCtx);
-        }
+        requestCycle(aLUT[cycleF * 5]);
+
+        if (cycleF < mode2_numCycles - 1)
+            requestCycle(aLUT[(cycleF + 1) * 5]);
 
         return nullptr;
     }
@@ -114,42 +116,16 @@ const VSFrameRef * TDecimate::GetFrameMode2(int n, int activationReason, void **
     return nullptr;
   }
 
-  if (activationReason == arInitial || (activationReason == arAllFramesReady && (intptr_t)*frameData != RetFrameIsReady)) {
-      vsapi->requestFrameFilter(ret, clip2, frameCtx);
-      *frameData = (void *)RetFrameIsReady;
+  if (requestChosenFrame(activationReason, frameData, ret, frameCtx))
       return nullptr;
-  }
 
-//  if (debug)
-//  {
-//    sprintf(buf, "TDecimate:  inframe = %d  useframe = %d  rate = %3.6f\n", n, ret, rate);
-//    OutputDebugString(buf);
-//  }
-
-  const VSFrameRef *src = vsapi->getFrameFilter(ret, clip2, frameCtx);
-
+  std::string body;
   if (display)
   {
-    VSFrameRef *dst = vsapi->copyFrame(src, core);
-    vsapi->freeFrame(src);
-
-#define SZ 160
-    char buf[SZ] = { 0 };
-
-    std::string text = "TDecimate " VERSION " by tritical\n";
-
-    snprintf(buf, SZ, "Mode: 2  Rate = %3.6f\n", rate);
-    text += buf;
-    snprintf(buf, SZ, "inframe = %d  useframe = %d\n", n, ret);
-    text += buf;
-#undef SZ
-
-    VSMap *props = vsapi->getFramePropsRW(dst);
-    vsapi->propSetData(props, PROP_TDecimateDisplay, text.c_str(), text.size(), paReplace);
-
-    return dst;
+    body += std::format("Mode: 2  Rate = {:3.6f}\n", rate);
+    body += std::format("inframe = {}  useframe = {}\n", n, ret);
   }
-  return src;
+  return chosenFrameWithDisplay(ret, frameCtx, core, body);
 }
 
 int TDecimate::getNonDecMode2(int n, int start, int stop) const
@@ -184,17 +160,92 @@ void TDecimate::mode2MarkDecFrames(int cycleF)
   }
 }
 
+// Mark up to (m - dec) more frames of the block starting at x for removal, preferring frames
+// that are clear local minima -- much lower than the nearest not-yet-dropped frame on each side
+// -- and falling back to simply the lowest metrics in the block. Shared by both removeMinN
+// overloads, which differ only in which metric array they score and where their scratch lives.
+void TDecimate::markLowestMetrics(int x, int m, int stop2, int &dec,
+  const std::vector<uint64_t> &metrics, uint64_t *metricsT, int *orderT)
+{
+  int t = 0;
+  for (int i = 0; i < stop2; ++i)
+  {
+    if (mode2_decA[x + i] == 0)
+    {
+      int v = 1;
+      double cM = (metrics[(x + i) << 1] * 100.0) / MAX_DIFF;
+      double pM = -20.0, nM = -20.0;
+      while (pM < 0 || nM < 0)
+      {
+        if (pM < 0)
+        {
+          if (x + i - v >= 0)
+          {
+            if (mode2_decA[x + i - v] != 1)
+              pM = (metrics[(x + i - v) << 1] * 100.0) / MAX_DIFF;
+          }
+          else pM = 1.0;
+        }
+        if (nM < 0)
+        {
+          if (x + i + v <= nfrms)
+          {
+            if (mode2_decA[x + i + v] != 1)
+              nM = (metrics[(x + i + v) << 1] * 100.0) / MAX_DIFF;
+          }
+          else nM = 1.0;
+        }
+        ++v;
+      }
+      if (pM >= 3.0 && nM >= 3.0 && cM < 3.0 && pM*0.5 > cM && nM*0.5 > cM)
+      {
+        orderT[t] = i;
+        metricsT[t] = (int)(std::min(pM - cM, nM - cM)*10000.0 + 0.5);
+        ++t;
+      }
+    }
+  }
+  if (t > 0)
+  {
+    sortMetrics(metricsT, orderT, t);
+    for (int i = 0; i < t && dec < m; ++i)
+    {
+      if (mode2_decA[x + orderT[t - 1 - i]] != 1)
+      {
+        mode2_decA[x + orderT[t - 1 - i]] = 1;
+        ++dec;
+      }
+    }
+  }
+  if (dec >= m) return;
+  for (int i = 0; i < stop2; ++i)
+  {
+    orderT[i] = i;
+    metricsT[i] = metrics[(x + i) << 1];
+  }
+  sortMetrics(metricsT, orderT, stop2);
+  for (int i = 0; i < stop2 && dec < m; ++i)
+  {
+    if (mode2_decA[x + orderT[i]] != 1)
+    {
+      mode2_decA[x + orderT[i]] = 1;
+      ++dec;
+    }
+  }
+}
+
 void TDecimate::removeMinN(int m, int n, int start, int stop)
 {
   for (int x = start; x < stop; x += n)
   {
-    int dec = 0, t = 0, stop2 = n;
+    int dec = 0, stop2 = n;
     if (x + n - 1 > nfrms)
     {
       m = (int)(double((nfrms - x + 1)*m) / double(n) + 0.5);
       if (m < 1) continue;
       stop2 = nfrms - x + 1;
     }
+    // frames the cycle already knows are duplicates go first
     if (curr.dupCount > 0)
     {
       int b = x - start;
@@ -210,70 +261,7 @@ void TDecimate::removeMinN(int m, int n, int start, int stop)
       }
       if (dec >= m) continue;
     }
-    for (int i = 0; i < stop2; ++i)
-    {
-      if (mode2_decA[x + i] == 0)
-      {
-        int v = 1;
-        double cM = (metricsOutArray[(x + i) << 1] * 100.0) / MAX_DIFF;
-        double pM = -20.0, nM = -20.0;
-        while (pM < 0 || nM < 0)
-        {
-          if (pM < 0)
-          {
-            if (x + i - v >= 0)
-            {
-              if (mode2_decA[x + i - v] == 0 || mode2_decA[x + i - v] == -20)
-                pM = (metricsOutArray[(x + i - v) << 1] * 100.0) / MAX_DIFF;
-            }
-            else pM = 1.0;
-          }
-          if (nM < 0)
-          {
-            if (x + i + v <= nfrms)
-            {
-              if (mode2_decA[x + i + v] == 0 || mode2_decA[x + i + v] == -20)
-                nM = (metricsOutArray[(x + i + v) << 1] * 100.0) / MAX_DIFF;
-            }
-            else nM = 1.0;
-          }
-          ++v;
-        }
-        if (pM >= 3.0 && nM >= 3.0 && cM < 3.0 && pM*0.5 > cM && nM*0.5 > cM)
-        {
-          mode2_order[t] = i;
-          mode2_metrics[t] = (int)(std::min(pM - cM, nM - cM)*10000.0 + 0.5);
-          ++t;
-        }
-      }
-    }
-    if (t > 0)
-    {
-      sortMetrics(mode2_metrics.data(), mode2_order.data(), t);
-      for (int i = 0; i < t && dec < m; ++i)
-      {
-        if (mode2_decA[x + mode2_order[t - 1 - i]] != 1)
-        {
-          mode2_decA[x + mode2_order[t - 1 - i]] = 1;
-          ++dec;
-        }
-      }
-    }
-    if (dec >= m) continue;
-    for (int i = 0; i < stop2; ++i)
-    {
-      mode2_order[i] = i;
-      mode2_metrics[i] = metricsOutArray[(x + i) << 1];
-    }
-    sortMetrics(mode2_metrics.data(), mode2_order.data(), n);
-    for (int i = 0; i < stop2 && dec < m; ++i)
-    {
-      if (mode2_decA[x + mode2_order[i]] != 1)
-      {
-        mode2_decA[x + mode2_order[i]] = 1;
-        ++dec;
-      }
-    }
+    markLowestMetrics(x, m, stop2, dec, metricsOutArray, mode2_metrics.data(), mode2_order.data());
   }
 }
 
@@ -281,13 +269,14 @@ void TDecimate::removeMinN(int m, int n, uint64_t *metricsT, int *orderT, int &o
 {
   for (int x = 0; x < vi.numFrames; x += n)
   {
-    int dec = 0, t = 0, stop2 = n;
+    int dec = 0, stop2 = n;
     if (x + n - 1 > nfrms)
     {
       m = (int)(double((nfrms - x + 1)*m) / double(n) + 0.5);
       if (m < 1) continue;
       stop2 = nfrms - x + 1;
     }
+    // frames the ovr file asked to drop go first
     if (ovrC > 0 && ovrArray.size())
     {
       for (int i = 0; i < stop2; ++i)
@@ -302,70 +291,7 @@ void TDecimate::removeMinN(int m, int n, uint64_t *metricsT, int *orderT, int &o
       }
       if (dec >= m) continue;
     }
-    for (int i = 0; i < stop2; ++i)
-    {
-      if (mode2_decA[x + i] == 0)
-      {
-        int v = 1;
-        double cM = (metricsArray[(x + i) << 1] * 100.0) / MAX_DIFF;
-        double pM = -20.0, nM = -20.0;
-        while (pM < 0 || nM < 0)
-        {
-          if (pM < 0)
-          {
-            if (x + i - v >= 0)
-            {
-              if (mode2_decA[x + i - v] != 1)
-                pM = (metricsArray[(x + i - v) << 1] * 100.0) / MAX_DIFF;
-            }
-            else pM = 1.0;
-          }
-          if (nM < 0)
-          {
-            if (x + i + v <= nfrms)
-            {
-              if (mode2_decA[x + i + v] != 1)
-                nM = (metricsArray[(x + i + v) << 1] * 100.0) / MAX_DIFF;
-            }
-            else nM = 1.0;
-          }
-          ++v;
-        }
-        if (pM >= 3.0 && nM >= 3.0 && cM < 3.0 && pM*0.5 > cM && nM*0.5 > cM)
-        {
-          orderT[t] = i;
-          metricsT[t] = (int)(std::min(pM - cM, nM - cM)*10000.0 + 0.5);
-          ++t;
-        }
-      }
-    }
-    if (t > 0)
-    {
-      sortMetrics(metricsT, orderT, t);
-      for (int i = 0; i < t && dec < m; ++i)
-      {
-        if (mode2_decA[x + orderT[t - 1 - i]] != 1)
-        {
-          mode2_decA[x + orderT[t - 1 - i]] = 1;
-          ++dec;
-        }
-      }
-    }
-    if (dec >= m) continue;
-    for (int i = 0; i < stop2; ++i)
-    {
-      orderT[i] = i;
-      metricsT[i] = metricsArray[(x + i) << 1];
-    }
-    sortMetrics(metricsT, orderT, stop2);
-    for (int i = 0; i < stop2 && dec < m; ++i)
-    {
-      if (mode2_decA[x + orderT[i]] != 1)
-      {
-        mode2_decA[x + orderT[i]] = 1;
-        ++dec;
-      }
-    }
+    markLowestMetrics(x, m, stop2, dec, metricsArray, metricsT, orderT);
   }
 }
 
@@ -460,7 +386,7 @@ double TDecimate::buildDecStrategy()
   {
     mode2_den = (int)frRatio;
     mode2_num = findNumerator(decRatio, mode2_den);
-    if (maxndl > 0 && maxndl < 99 && mode2_num - mode2_den < maxndl) mode2_den = mode2_num + maxndl;
+    if (maxndl > 0 && maxndl < 99 && mode2_den - mode2_num < maxndl) mode2_den = mode2_num + maxndl;
   }
   if (mode2_den <= 0 || mode2_num <= 0 || mode2_num > 100 || mode2_den > 100 || mode2_num >= mode2_den)
       throw TIVTCError("TDecimate:  mode 2 invalid num and den results!");
@@ -496,7 +422,10 @@ double TDecimate::buildDecStrategy()
   if (aLUT.size()) aLUT.resize(0);
   if (allMetrics)
   {
-    aLUT.resize((int)(vi.numFrames*rate / fps), 0);
+    // Size must match the output frame count, which is derived from aRate (not the
+    // requested rate) at TDecimate.cpp: vi.numFrames = numFrames * (arate / fps).
+    // aRate >= rate, so sizing by rate under-allocates and aLUT[n] over-reads.
+    aLUT.resize((int)(vi.numFrames * (aRate / fps)), 0);
 
     std::vector<int> orderT(vi.numFrames, 0);
     std::vector<uint64_t> metricsT(vi.numFrames, 0);
@@ -525,12 +454,9 @@ double TDecimate::buildDecStrategy()
       }
     }
     mode2_decA.resize(0);
-//    if (debug)
-//    {
-//      sprintf(buf, "drop count = %d  expected = %d\n", vi.numFrames - v,
-//        vi.numFrames - (int)(vi.numFrames*aRate / fps));
-//      OutputDebugString(buf);
-//    }
+    if (debug)
+      logInfo(vsapi, vscore, "drop count = {}  expected = {}", vi.numFrames - v,
+        vi.numFrames - (int)(vi.numFrames*aRate / fps));
     mode2_numCycles = -20;
   }
   else
@@ -571,12 +497,9 @@ double TDecimate::buildDecStrategy()
       }
       aLUT[x * 5 + 3] = x*clength + add - dropCount;
     }
-//    if (debug)
-//    {
-//      sprintf(buf, "drop count = %d  expected = %d\n", dropCount,
-//        vi.numFrames - (int)(vi.numFrames*aRate / fps));
-//      OutputDebugString(buf);
-//    }
+    if (debug)
+      logInfo(vsapi, vscore, "drop count = {}  expected = {}", dropCount,
+        vi.numFrames - (int)(vi.numFrames*aRate / fps));
     if (clength != 5)
     {
       prev.setSize(clength);
@@ -586,18 +509,16 @@ double TDecimate::buildDecStrategy()
     prev.length = curr.length = next.length = clength;
   }
   memcpy(mode2_cfs, rc, 10 * sizeof(int));
-//  if (debug)
-//  {
-//    sprintf(buf, "rate = %f  actual rate = %f\n", rate, aRate);
-//    OutputDebugString(buf);
-//    sprintf(buf, "mode2_num = %d  mode2_den = %d  numCycles = %d  clength = %d\n", mode2_num, mode2_den, mode2_numCycles, clength);
-//    OutputDebugString(buf);
-//    for (int x = 0; x < 10; ++x)
-//    {
-//      if (mode2_cfs[x] <= 0) break;
-//      sprintf(buf, "mode2_cfs %d = %d\n", x, mode2_cfs[x]);
-//      OutputDebugString(buf);
-//    }
-//  }
+  if (debug)
+  {
+    logInfo(vsapi, vscore, "rate = {:f}  actual rate = {:f}", rate, aRate);
+    logInfo(vsapi, vscore, "mode2_num = {}  mode2_den = {}  numCycles = {}  clength = {}",
+      mode2_num, mode2_den, mode2_numCycles, clength);
+    for (int x = 0; x < 10; ++x)
+    {
+      if (mode2_cfs[x] <= 0) break;
+      logInfo(vsapi, vscore, "mode2_cfs {} = {}", x, mode2_cfs[x]);
+    }
+  }
   return aRate;
 }
