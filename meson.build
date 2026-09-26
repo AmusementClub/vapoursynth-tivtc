@@ -70,18 +70,13 @@ sources = [
   'src/TFMPP.cpp',
 ]
 
-py = import('python').find_installation(pure: false)
-
-# Ask the VapourSynth Python module where its headers live rather than going through
-# pkg-config, which is often absent on Windows and unnecessary here: the module is installed
-# alongside every VapourSynth install and knows the answer already.
-incdir = include_directories(
-  run_command(py, '-c', 'import vapoursynth as vs; print(vs.get_include())', check: true).stdout().strip(),
-)
+deps = [
+  dependency('vapoursynth').partial_dependency(includes: true, compile_args: true),
+]
 
 shared_module('tivtc',
               sources,
-              include_directories: incdir,
+              dependencies: deps,
               link_args: ldflags,
               cpp_args: cflags,
               install: true)
