@@ -348,8 +348,10 @@ void blend_5050_c(uint8_t* __restrict dstp, const uint8_t* srcp1, const uint8_t*
 }
 
 // instantiate
-template void blend_5050_c<uint8_t>(uint8_t* dstp, const uint8_t* srcp1, const uint8_t* srcp2, int width, int height, ptrdiff_t dst_pitch, ptrdiff_t src1_pitch, ptrdiff_t src2_pitch);
-template void blend_5050_c<uint16_t>(uint8_t* dstp, const uint8_t* srcp1, const uint8_t* srcp2, int width, int height, ptrdiff_t dst_pitch, ptrdiff_t src1_pitch, ptrdiff_t src2_pitch);
+// MSVC mangles __restrict into the symbol name, so the instantiation must
+// repeat it to match the declaration in TCommonASM.h.
+template void blend_5050_c<uint8_t>(uint8_t* __restrict dstp, const uint8_t* srcp1, const uint8_t* srcp2, int width, int height, ptrdiff_t dst_pitch, ptrdiff_t src1_pitch, ptrdiff_t src2_pitch);
+template void blend_5050_c<uint16_t>(uint8_t* __restrict dstp, const uint8_t* srcp1, const uint8_t* srcp2, int width, int height, ptrdiff_t dst_pitch, ptrdiff_t src1_pitch, ptrdiff_t src2_pitch);
 
 // like HandleChromaCombing in TDeinterlace
 // used by isCombedTIVTC as well

@@ -4,52 +4,63 @@ project('TIVTC', 'cpp',
         meson_version: '>=1.2.3')
 
 
-warnings = [
-  '-Wall',
-  '-Wextra',
-  '-Wshadow',
-  '-Wno-unused-function',
-]
-
-cflags = [
-  warnings,
-  '-fvisibility=hidden',
-]
-
-ldflags = [
-]
-
-
-host_cpu_family = host_machine.cpu_family()
-
-
-host_system = host_machine.system()
-
-if host_system == 'windows' or host_system == 'cygwin'
-  if host_cpu_family == 'x86'
-    cflags += '-mstackrealign'
-    ldflags += '-Wl,--kill-at'
-  endif
-
-  # Avoid linking errors:
-  # /usr/lib/gcc/x86_64-w64-mingw32/10.2.0/../../../../x86_64-w64-mingw32/bin/ld: libtivtc.dll.p/src_TFM.cpp.obj:TFM.cpp:(.text+0x9019): undefined reference to `__strcat_chk' 
-  cflags += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0']
-
-  # windows.h's min/max macros clash with std::min/std::max.
-  cflags += '-DNOMINMAX'
-endif
-
-
 cxx = meson.get_compiler('cpp')
 
 cxx_id = cxx.get_id()
 
-if cxx_id.startswith('clang')
-  cflags += '-DCLANG=1'
-endif
+if cxx_id == 'msvc'
+  # cl hard-errors on GCC-style options (e.g. -Wextra), so use an MSVC set.
+  cflags = [
+    '/W4',
+    '/permissive-',
+    '/utf-8',
+    '/D_CRT_SECURE_NO_WARNINGS',
+    '/DNOMINMAX',
+  ]
 
-if cxx_id == 'gcc'
-  cflags += '-DGCC=1'
+  ldflags = [
+  ]
+else
+  warnings = [
+    '-Wall',
+    '-Wextra',
+    '-Wshadow',
+    '-Wno-unused-function',
+  ]
+
+  cflags = [
+    warnings,
+    '-fvisibility=hidden',
+  ]
+
+  ldflags = [
+  ]
+
+  host_cpu_family = host_machine.cpu_family()
+
+  host_system = host_machine.system()
+
+  if host_system == 'windows' or host_system == 'cygwin'
+    if host_cpu_family == 'x86'
+      cflags += '-mstackrealign'
+      ldflags += '-Wl,--kill-at'
+    endif
+
+    # Avoid linking errors:
+    # /usr/lib/gcc/x86_64-w64-mingw32/10.2.0/../../../../x86_64-w64-mingw32/bin/ld: libtivtc.dll.p/src_TFM.cpp.obj:TFM.cpp:(.text+0x9019): undefined reference to `__strcat_chk'
+    cflags += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0']
+
+    # windows.h's min/max macros clash with std::min/std::max.
+    cflags += '-DNOMINMAX'
+  endif
+
+  if cxx_id.startswith('clang')
+    cflags += '-DCLANG=1'
+  endif
+
+  if cxx_id == 'gcc'
+    cflags += '-DGCC=1'
+  endif
 endif
 
 
