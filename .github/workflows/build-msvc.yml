@@ -62,15 +62,18 @@ jobs:
           meson setup build --vsenv --buildtype=release -Db_vscrt=mt
           meson compile -C build
 
-      - name: Package the DLL with its license
+      - name: Stage the plugin files
         shell: pwsh
-        run: Compress-Archive -Path build\tivtc.dll, LICENSE -DestinationPath tivtc-api4-windows-x64-msvc.zip
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item build\tivtc.dll package\
+          Copy-Item LICENSE package\
 
       - name: Upload the plugin archive
         uses: actions/upload-artifact@v7
         with:
           name: tivtc-api4-windows-x64-msvc
-          path: tivtc-api4-windows-x64-msvc.zip
+          path: package
           if-no-files-found: error
 
       - name: Upload the meson log on failure
