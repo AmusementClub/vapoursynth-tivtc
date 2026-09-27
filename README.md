@@ -282,18 +282,6 @@ meson setup build
 meson compile -C build
 ```
 
-The headers are located by asking the VapourSynth Python module for them:
-
-```py
-import vapoursynth as vs; print(vs.get_include())
-```
-
-so the only requirement is that the `vapoursynth` module is importable by the Python meson picks
-up — no pkg-config and no separate SDK install. If you have several Python installations, point
-meson at the right one with `meson setup build -Dpython.name=/path/to/python`.
-
-The result is `libtivtc.so` on Linux and macOS, `tivtc.dll` on Windows.
-
 ## References
 
 This is a port, and it would not exist without the work behind it.
