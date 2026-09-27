@@ -1,0 +1,80 @@
+name: Windows MSVC build
+
+on:
+  push:
+    branches: ['master']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: MSVC x64
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check out the pinned VapourSynth API4 SDK (R57.A8)
+        uses: actions/checkout@v7
+        with:
+          repository: AmusementClub/vapoursynth-classic
+          ref: R57.A8
+          sparse-checkout: include
+          path: .ci/vapoursynth-classic
+          persist-credentials: false
+
+      - name: Install pkg-config for meson SDK discovery
+        run: choco install pkgconfiglite -y --no-progress
+
+      - name: Install meson and ninja
+        run: python -m pip install "meson>=1.2.3" ninja
+
+      - name: Write the pkg-config file for the SDK headers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .ci/pkgconfig | Out-Null
+          $sdk = (Resolve-Path .ci/vapoursynth-classic/include).Path -replace '\\', '/'
+          @"
+          Name: vapoursynth
+          Description: pinned classic API4 headers only (R57.A8)
+          Version: 4.0
+          Cflags: -I"$sdk"
+          Libs:
+          "@ | Set-Content -Encoding ascii .ci/pkgconfig/vapoursynth.pc
+
+      - name: Build with MSVC
+        shell: pwsh
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}\.ci\pkgconfig
+        run: |
+          meson setup build --vsenv --buildtype=release -Db_vscrt=mt
+          meson compile -C build
+
+      - name: Package the DLL with its license
+        shell: pwsh
+        run: Compress-Archive -Path build\tivtc.dll, LICENSE -DestinationPath tivtc-api4-windows-x64-msvc.zip
+
+      - name: Upload the plugin archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: tivtc-api4-windows-x64-msvc
+          path: tivtc-api4-windows-x64-msvc.zip
+          if-no-files-found: error
+
+      - name: Upload the meson log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: msvc-build-meson-log
+          path: build/meson-logs/meson-log.txt
+          if-no-files-found: ignore
