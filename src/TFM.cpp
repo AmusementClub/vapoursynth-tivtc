@@ -1807,9 +1807,8 @@ void TFM::validateParameters()
     throw TIVTCError("TFM:  slow must be set to 0, 1, or 2!");
   if (micout < 0 || micout > 2)
     throw TIVTCError("TFM:  micout must be set to 0, 1, or 2!");
-  // Only 1, 2 and 3 are implemented; 4 used to be accepted but silently did nothing.
-  if (micmatching < 0 || micmatching > 3)
-    throw TIVTCError("TFM:  micmatching must be set to 0, 1, 2, or 3!");
+  if (micmatching < 0 || micmatching > 4)
+    throw TIVTCError("TFM:  micmatching must be set to 0, 1, 2, 3, or 4!");
   if (opt < 0 || opt > 4)
     throw TIVTCError("TFM:  opt must be set to 0, 1, 2, 3, or 4!");
   if (metric != 0 && metric != 1)
