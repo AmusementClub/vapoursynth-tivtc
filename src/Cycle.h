@@ -3,8 +3,8 @@
 **
 **   TIVTC includes a field matching filter (TFM) and a decimation
 **   filter (TDecimate) which can be used together to achieve an
-**   IVTC or for other uses. TIVTC currently supports 8 bit planar YUV and
-**   YUY2 colorspaces.
+**   IVTC or for other uses. TIVTC supports 8-16 bit planar YUV
+**   (4:4:4, 4:2:2 and 4:2:0).
 **
 **   Copyright (C) 2004-2008 Kevin Stone, additional work (C) 2020 pinterf
 **
@@ -53,7 +53,6 @@
 
 #include <stdio.h>
 #include <limits.h>
-//#include "profUtil.h"
 #include "stdint.h"
 #include <vector>
 
@@ -61,7 +60,7 @@ class Cycle
 {
 private:
   int cycleSize;
-  bool allocSpace();
+  void allocSpace();
   bool checkMatchDup(int mp, int mc);
 
 public:
@@ -76,16 +75,17 @@ public:
   int frameSO;	// frame + cycleS
   int frameEO;	// frame + cycleE
   int type;		// video or film and how
-  double *diffMetricsN;			// normalized metrics
-  uint64_t *diffMetricsU;	// unnormalized metrics
-  uint64_t *diffMetricsUF;	// frame metrics (scenechange detection)
-  uint64_t *tArray;			// used as temp storage when sorting
-  int *dupArray;	// duplicate marking
-  int *lowest;	// sorted list of metrics
-  int *decimate;	// position of frames to drop
-  int *decimate2;	// needed for some parts of longest string decimation
-  int *match;		// frame matches (used for 30p identification)
-  int *filmd2v;	// d2v trf flags indicate duplicate
+  // All of these hold cycleSize elements and are allocated, resized and copied as a group.
+  std::vector<double> diffMetricsN;		// normalized metrics
+  std::vector<uint64_t> diffMetricsU;	// unnormalized metrics
+  std::vector<uint64_t> diffMetricsUF;	// frame metrics (scenechange detection)
+  std::vector<uint64_t> tArray;			// used as temp storage when sorting
+  std::vector<int> dupArray;	// duplicate marking
+  std::vector<int> lowest;	// sorted list of metrics
+  std::vector<int> decimate;	// position of frames to drop
+  std::vector<int> decimate2;	// needed for some parts of longest string decimation
+  std::vector<int> match;		// frame matches (used for 30p identification)
+  std::vector<int> filmd2v;	// d2v trf flags indicate duplicate
   bool dupsSet;	// dups set
   bool mSet;		// metrics set
   bool lowSet;	// list sorted
@@ -93,9 +93,10 @@ public:
   bool isfilmd2v;	// d2v indicates duplicate in cycle
   int dupCount;	// tracks # of dups for longest string decimation
   int blend;		// 0, 1 (blending), 2 (mkv), others are hijacked for special handling
-  int *dect, *dect2;
+  std::vector<int> dect, dect2; // scratch copies of decimate/decimate2
 
   void setFrame(int frameIn);
+  void markLowestForDecimation(int target, const char *which);
   void setDecimateLow(int num);
   void setLowest(bool exludeD);
   void setDups(double thresh);
@@ -106,13 +107,10 @@ public:
   int sceneDetect(Cycle &prev, Cycle &next, uint64_t thresh);
   int getNonDec(int n);
   void clearAll();
-  void debugOutput();
-  void debugMetrics(int length);
 
   Cycle(int _size, int _sdlim);
   void setSize(int _size);
-  ~Cycle();
-  Cycle& operator=(Cycle& ob2);
+  Cycle& operator=(const Cycle& ob2);
 };
 
 #endif // CYCLE_H

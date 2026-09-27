@@ -3,8 +3,8 @@
 **
 **   TIVTC includes a field matching filter (TFM) and a decimation
 **   filter (TDecimate) which can be used together to achieve an
-**   IVTC or for other uses. TIVTC currently supports 8 bit planar YUV and
-**   YUY2 colorspaces.
+**   IVTC or for other uses. TIVTC supports 8-16 bit planar YUV
+**   (4:4:4, 4:2:2 and 4:2:0).
 **
 **   Copyright (C) 2004-2008 Kevin Stone, additional work (C) 2020 pinterf
 **
@@ -24,10 +24,8 @@
 */
 
 #include "Cycle.h"
-//#include "avisynth.h"
 #include "stdint.h"
 #include <inttypes.h>
-//#include <windows.h> // OutputDebugString
 #include <algorithm>
 #include <cstring>
 #include "internal.h"
@@ -47,6 +45,63 @@ void Cycle::setFrame(int frameIn)
   frameEO = frame + cycleE;
 }
 
+// Mark `target` more frames of the cycle for decimation, lowest metric first, keeping marks at
+// least sdlim frames apart. If that spacing makes the target unreachable the limit is relaxed and
+// the pass retried: a negative sdlim steps it down one at a time, rolling the marks back each
+// pass, while a positive one is simply dropped. `which` only distinguishes the two error messages.
+void Cycle::markLowestForDecimation(int target, const char *which)
+{
+  const int istop = cycleE - cycleS;
+  int asd = abs(sdlim);
+  if (sdlim < 0)
+  {
+    dect = decimate;
+    dect2 = decimate2;
+  }
+  int v = 0;
+  while (true)
+  {
+    for (int i = 0; v < target && i < istop; ++i)
+    {
+      bool update = true;
+      for (int c = std::max(cycleS, lowest[i] - asd); c <= std::min(cycleE - 1, lowest[i] + asd); ++c)
+      {
+        if (decimate[c] == 1)
+        {
+          update = false;
+          break;
+        }
+      }
+      if (update)
+      {
+        decimate[lowest[i]] = 1;
+        int u = lowest[i];
+        while (decimate2[u] == 1) ++u;
+        decimate2[u] = 1;
+        ++v;
+      }
+    }
+    if (v == target) return;
+    int remain = 0;
+    for (int i = 0; i < istop; ++i)
+    {
+      if (decimate[lowest[i]] != 1)
+        ++remain;
+    }
+    if (remain <= 0 || asd <= 0)
+      throw TIVTCError(std::string("TIVTC-Cycle:  unable to mark the required number of frames "
+        "for decimation (") + which + ").");
+    if (sdlim < 0)
+    {
+      --asd;
+      decimate = dect;
+      decimate2 = dect2;
+      v = 0;
+    }
+    else asd = 0;
+  }
+}
+
 void Cycle::setDecimateLow(int num)
 {
   if (decSet) return;
@@ -63,58 +118,7 @@ void Cycle::setDecimateLow(int num)
     else ++ovrDec;
   }
   for (int i = std::max(cycleE, 0); i < length; ++i) decimate[i] = decimate2[i] = -20;
-  const int istop = cycleE - cycleS;
-  int asd = abs(sdlim);
-  if (sdlim < 0)
-  {
-    memcpy(dect, decimate, cycleSize * sizeof(int));
-    memcpy(dect2, decimate2, cycleSize * sizeof(int));
-  }
-  int v = 0;
-mrestart:
-  for (int i = 0; v < num - ovrDec && i < istop; ++i)
-  {
-    bool update = true;
-    for (int c = std::max(cycleS, lowest[i] - asd); c <= std::min(cycleE - 1, lowest[i] + asd); ++c)
-    {
-      if (decimate[c] == 1)
-      {
-        update = false;
-        break;
-      }
-    }
-    if (update)
-    {
-      decimate[lowest[i]] = 1;
-      int u = lowest[i];
-      while (decimate2[u] == 1) ++u;
-      decimate2[u] = 1;
-      ++v;
-    }
-  }
-  if (v != num - ovrDec)
-  {
-    int remain = 0;
-    for (int i = 0; i < istop; ++i)
-    {
-      if (decimate[lowest[i]] != 1)
-        ++remain;
-    }
-    if (remain > 0 && asd > 0)
-    {
-      if (sdlim < 0)
-      {
-        --asd;
-        memcpy(decimate, dect, cycleSize * sizeof(int));
-        memcpy(decimate2, dect2, cycleSize * sizeof(int));
-        v = 0;
-      }
-      else asd = 0;
-      goto mrestart;
-    }
-    throw TIVTCError("TIVTC-Cycle:  unable to mark the required number of frames " \
-      "for decimation (1).");
-  }
+  markLowestForDecimation(num - ovrDec, "1");
   decSet = true;
 }
 
@@ -125,58 +129,7 @@ void Cycle::setDecimateLowP(int num)
     for (int x = 0; x < length; ++x) decimate[x] = decimate2[x] = -20;
     return;
   }
-  const int istop = cycleE - cycleS;
-  int asd = abs(sdlim);
-  if (sdlim < 0)
-  {
-    memcpy(dect, decimate, cycleSize * sizeof(int));
-    memcpy(dect2, decimate2, cycleSize * sizeof(int));
-  }
-  int v = 0;
-mrestart:
-  for (int i = 0; v < num && i < istop; ++i)
-  {
-    bool update = true;
-    for (int c = std::max(cycleS, lowest[i] - asd); c <= std::min(cycleE - 1, lowest[i] + asd); ++c)
-    {
-      if (decimate[c] == 1)
-      {
-        update = false;
-        break;
-      }
-    }
-    if (update)
-    {
-      decimate[lowest[i]] = 1;
-      int u = lowest[i];
-      while (decimate2[u] == 1) ++u;
-      decimate2[u] = 1;
-      ++v;
-    }
-  }
-  if (v != num)
-  {
-    int remain = 0;
-    for (int i = 0; i < istop; ++i)
-    {
-      if (decimate[lowest[i]] != 1)
-        ++remain;
-    }
-    if (remain > 0 && asd > 0)
-    {
-      if (sdlim < 0)
-      {
-        --asd;
-        memcpy(decimate, dect, cycleSize * sizeof(int));
-        memcpy(decimate2, dect2, cycleSize * sizeof(int));
-        v = 0;
-      }
-      else asd = 0;
-      goto mrestart;
-    }
-    throw TIVTCError("TIVTC-Cycle:  unable to mark the required number of frames " \
-      "for decimation (2).");
-  }
+  markLowestForDecimation(num, "2");
 }
 
 void Cycle::setLowest(bool excludeD)
@@ -402,123 +355,43 @@ int Cycle::sceneDetect(Cycle &prev, Cycle &next, uint64_t thresh)
   return -20;
 }
 
-void Cycle::debugOutput()
-{
-//  char temp[256];
-//  sprintf(temp, "Cycle:  length = %d  maxFrame = %d  size = %d\n", length, maxFrame, cycleSize);
-//  OutputDebugString(temp);
-//  sprintf(temp, "Cycle:  frame = %d   frameE = %d\n", frame, frameE);
-//  OutputDebugString(temp);
-//  sprintf(temp, "Cycle:  cycleS = %d  cycleE = %d\n", cycleS, cycleE);
-//  OutputDebugString(temp);
-//  sprintf(temp, "Cycle:  frameSO = %d frameEO = %d\n", frameSO, frameEO);
-//  OutputDebugString(temp);
-//  sprintf(temp, "Cycle:  offE = %d    type = %d  blend = %d  dupCount = %d\n", offE, type, blend, dupCount);
-//  OutputDebugString(temp);
-//  sprintf(temp, "Cycle:  dupSet = %c  mSet = %c  lowSet = %c  decSet = %c  isfilmd2v = %c\n",
-//    dupsSet ? 'T' : 'F', mSet ? 'T' : 'F', lowSet ? 'T' : 'F', decSet ? 'T' : 'F',
-//    isfilmd2v ? 'T' : 'F');
-//  OutputDebugString(temp);
-}
-
-void Cycle::debugMetrics(int _length)
-{
-//  char temp[256];
-//  for (int x = 0; x < _length; ++x)
-//  {
-//    sprintf(temp, "Cycle:  %d - %3.2f  %" PRIu64 "  %" PRIu64 "\n", x, diffMetricsN[x], diffMetricsU[x],
-//      diffMetricsUF[x]);
-//    OutputDebugString(temp);
-//    sprintf(temp, "Cycle:  %d - dup = %d  lowest = %d  decimate = %d  decimate2 = %d  match = %d  filmd2v = %d\n", x,
-//      dupArray[x], lowest[x], decimate[x], decimate2[x], match[x], filmd2v[x]);
-//    OutputDebugString(temp);
-//  }
-}
-
 Cycle::Cycle(int _size, int _sdlim)
 {
   mSet = lowSet = dupsSet = decSet = isfilmd2v = false;
   length = frame = frameE = cycleS = cycleE = offE = -20;
   frameSO = frameEO = maxFrame = dupCount = blend = -20;
   type = -1;
-  dupArray = lowest = match = decimate = decimate2 = filmd2v = nullptr;
-  dect = dect2 = nullptr;
-  diffMetricsU = diffMetricsUF = tArray = nullptr;
-  diffMetricsN = nullptr;
   cycleSize = std::max(0, _size);
   sdlim = _sdlim;
   allocSpace();
-  for (int x = 0; x < cycleSize; ++x)
-  {
-    dupArray[x] = lowest[x] = decimate[x] = match[x] = decimate2[x] = filmd2v[x] = -20;
-    diffMetricsU[x] = diffMetricsUF[x] = tArray[x] = UINT64_MAX;
-    diffMetricsN[x] = -20.0;
-  }
 }
 
-Cycle::~Cycle()
+// Sizes every array to cycleSize and fills it with the "not set" sentinel.
+void Cycle::allocSpace()
 {
-  if (dupArray != nullptr) { free(dupArray); dupArray = nullptr; }
-  if (lowest != nullptr) { free(lowest); lowest = nullptr; }
-  if (match != nullptr) { free(match); match = nullptr; }
-  if (filmd2v != nullptr) { free(filmd2v); filmd2v = nullptr; }
-  if (decimate != nullptr) { free(decimate); decimate = nullptr; }
-  if (decimate2 != nullptr) { free(decimate2); decimate2 = nullptr; }
-  if (dect != nullptr) { free(dect); dect = nullptr; }
-  if (dect2 != nullptr) { free(dect2); dect2 = nullptr; }
-  if (diffMetricsU != nullptr) { free(diffMetricsU); diffMetricsU = nullptr; }
-  if (diffMetricsUF != nullptr) { free(diffMetricsUF); diffMetricsUF = nullptr; }
-  if (tArray != nullptr) { free(tArray); tArray = nullptr; }
-  if (diffMetricsN != nullptr) { free(diffMetricsN); diffMetricsN = nullptr; }
-}
-
-bool Cycle::allocSpace()
-{
-  if (dupArray != nullptr) { free(dupArray); dupArray = nullptr; }
-  if (lowest != nullptr) { free(lowest); lowest = nullptr; }
-  if (match != nullptr) { free(match); match = nullptr; }
-  if (filmd2v != nullptr) { free(filmd2v); filmd2v = nullptr; }
-  if (decimate != nullptr) { free(decimate); decimate = nullptr; }
-  if (decimate2 != nullptr) { free(decimate2); decimate2 = nullptr; }
-  if (dect != nullptr) { free(dect); dect = nullptr; }
-  if (dect2 != nullptr) { free(dect2); dect2 = nullptr; }
-  if (diffMetricsU != nullptr) { free(diffMetricsU); diffMetricsU = nullptr; }
-  if (diffMetricsUF != nullptr) { free(diffMetricsUF); diffMetricsUF = nullptr; }
-  if (tArray != nullptr) { free(tArray); tArray = nullptr; }
-  if (diffMetricsN != nullptr) { free(diffMetricsN); diffMetricsN = nullptr; }
-  dupArray = (int *)malloc(cycleSize * sizeof(int));
-  lowest = (int *)malloc(cycleSize * sizeof(int));
-  match = (int *)malloc(cycleSize * sizeof(int));
-  filmd2v = (int *)malloc(cycleSize * sizeof(int));
-  decimate = (int *)malloc(cycleSize * sizeof(int));
-  decimate2 = (int *)malloc(cycleSize * sizeof(int));
-  dect = (int *)malloc(cycleSize * sizeof(int));
-  dect2 = (int *)malloc(cycleSize * sizeof(int));
-  diffMetricsU = (uint64_t *)malloc(cycleSize * sizeof(uint64_t));
-  diffMetricsUF = (uint64_t *)malloc(cycleSize * sizeof(uint64_t));
-  tArray = (uint64_t *)malloc(cycleSize * sizeof(uint64_t));
-  diffMetricsN = (double *)malloc(cycleSize * sizeof(double));
-  if (dupArray == nullptr || lowest == nullptr || match == nullptr || filmd2v == nullptr ||
-    decimate == nullptr || decimate2 == nullptr || diffMetricsU == nullptr ||
-    diffMetricsUF == nullptr || diffMetricsN == nullptr || tArray == nullptr ||
-    dect == nullptr || dect2 == nullptr) return false;
-  return true;
+  dupArray.assign(cycleSize, -20);
+  lowest.assign(cycleSize, -20);
+  match.assign(cycleSize, -20);
+  filmd2v.assign(cycleSize, -20);
+  decimate.assign(cycleSize, -20);
+  decimate2.assign(cycleSize, -20);
+  dect.assign(cycleSize, -20);
+  dect2.assign(cycleSize, -20);
+  diffMetricsU.assign(cycleSize, UINT64_MAX);
+  diffMetricsUF.assign(cycleSize, UINT64_MAX);
+  tArray.assign(cycleSize, UINT64_MAX);
+  diffMetricsN.assign(cycleSize, -20.0);
 }
 
 void Cycle::setSize(int _size)
 {
   cycleSize = std::max(0, _size);
   allocSpace();
-  for (int x = 0; x < cycleSize; ++x)
-  {
-    dupArray[x] = lowest[x] = decimate[x] = match[x] = decimate2[x] = filmd2v[x] = -20;
-    diffMetricsU[x] = diffMetricsUF[x] = tArray[x] = UINT64_MAX;
-    diffMetricsN[x] = -20.0;
-  }
 }
 
-Cycle& Cycle::operator=(Cycle& ob2)
+Cycle& Cycle::operator=(const Cycle& ob2)
 {
+  if (this == &ob2) return *this;
   length = ob2.length;
   maxFrame = ob2.maxFrame;
   frame = ob2.frame;
@@ -536,16 +409,21 @@ Cycle& Cycle::operator=(Cycle& ob2)
   dupCount = ob2.dupCount;
   blend = ob2.blend;
   isfilmd2v = ob2.isfilmd2v;
-  cycleSize = std::min(cycleSize, ob2.cycleSize);
+  // Adopt the source's size along with its data; tArray/dect/dect2 are scratch that every user
+  // rewrites before reading, so they only have to keep matching cycleSize.
+  cycleSize = ob2.cycleSize;
   if (length > cycleSize) length = cycleSize;
-  memcpy(dupArray, ob2.dupArray, cycleSize * sizeof(int));
-  memcpy(lowest, ob2.lowest, cycleSize * sizeof(int));
-  memcpy(match, ob2.match, cycleSize * sizeof(int));
-  memcpy(filmd2v, ob2.filmd2v, cycleSize * sizeof(int));
-  memcpy(decimate, ob2.decimate, cycleSize * sizeof(int));
-  memcpy(decimate2, ob2.decimate2, cycleSize * sizeof(int));
-  memcpy(diffMetricsU, ob2.diffMetricsU, cycleSize * sizeof(uint64_t));
-  memcpy(diffMetricsUF, ob2.diffMetricsUF, cycleSize * sizeof(uint64_t));
-  memcpy(diffMetricsN, ob2.diffMetricsN, cycleSize * sizeof(double));
+  dupArray = ob2.dupArray;
+  lowest = ob2.lowest;
+  match = ob2.match;
+  filmd2v = ob2.filmd2v;
+  decimate = ob2.decimate;
+  decimate2 = ob2.decimate2;
+  diffMetricsU = ob2.diffMetricsU;
+  diffMetricsUF = ob2.diffMetricsUF;
+  diffMetricsN = ob2.diffMetricsN;
+  tArray.resize(cycleSize);
+  dect.resize(cycleSize);
+  dect2.resize(cycleSize);
   return *this;
 }

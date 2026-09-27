@@ -3,8 +3,8 @@
 **
 **   TIVTC includes a field matching filter (TFM) and a decimation
 **   filter (TDecimate) which can be used together to achieve an
-**   IVTC or for other uses. TIVTC currently supports 8 bit planar YUV and
-**   YUY2 colorspaces.
+**   IVTC or for other uses. TIVTC supports 8-16 bit planar YUV
+**   (4:4:4, 4:2:2 and 4:2:0).
 **
 **   Copyright (C) 2004-2008 Kevin Stone, additional work (C) 2020 pinterf
 **
@@ -27,7 +27,7 @@
 #include <inttypes.h>
 #include <algorithm>
 
-const VSFrameRef * TDecimate::GetFrameMode7(int n, int activationReason, void **frameData, VSFrameContext *frameCtx, VSCore *core)
+const VSFrame * TDecimate::GetFrameMode7(int n, int activationReason, void **frameData, VSFrameContext *frameCtx, VSCore *core)
 {
     if (activationReason != arInitial && activationReason != arAllFramesReady)
         return nullptr;
@@ -36,9 +36,9 @@ const VSFrameRef * TDecimate::GetFrameMode7(int n, int activationReason, void **
   int prev_f = int(double(n - 1)*ratio + 1.0);
   if (prev_f < 0) prev_f = 0;
   int curr1_f = int(double(n)*ratio);
-  if (curr1_f > nfrms) mode2_decA[n] = nfrms;
+  if (curr1_f > nfrms) curr1_f = nfrms;
   int curr2_f = int(double(n)*ratio + 1.0);
-  if (curr2_f > nfrms) mode2_decA[n] = nfrms;
+  if (curr2_f > nfrms) curr2_f = nfrms;
   int next_f = int(double(n + 1)*ratio);
   if (next_f > nfrms) next_f = nfrms;
   int curr_real = mode2_decA[n];
@@ -64,8 +64,8 @@ const VSFrameRef * TDecimate::GetFrameMode7(int n, int activationReason, void **
             } else {
               int blockNI, blocksI;
               uint64_t metricF;
-              const VSFrameRef *frame1 = vsapi->getFrameFilter(i - 1, child, frameCtx);
-              const VSFrameRef *frame2 = vsapi->getFrameFilter(i, child, frameCtx);
+              const VSFrame *frame1 = vsapi->getFrameFilter(i - 1, child, frameCtx);
+              const VSFrame *frame2 = vsapi->getFrameFilter(i, child, frameCtx);
               metricsOutArray[i << 1] =
                 calcMetric(frame1, frame2,
                   vi_child, blockNI, blocksI, metricF, false, core);
@@ -126,72 +126,47 @@ const VSFrameRef * TDecimate::GetFrameMode7(int n, int activationReason, void **
       return nullptr;
   }
 
-//  if (debug)
-//  {
-//    sprintf(buf, "TDecimate:  ------------------------------------------\n");
-//    OutputDebugString(buf);
-//    sprintf(buf, "TDecimate:  inframe = %d  useframe = %d  chosen = %d\n", n, ret, chosen);
-//    OutputDebugString(buf);
-//    sprintf(buf, "TDecimate:  prev = %d  curr1 = %d  curr2 = %d  next = %d\n", prev_f,
-//      curr1_f, curr2_f, next_f);
-//    OutputDebugString(buf);
-//    for (int i = std::max(0, ret - 3); i <= std::min(ret + 3, nfrms); ++i)
-//    {
-//      sprintf(buf, "TDecimate:  %d:  %3.2f  %" PRIu64 "%s%s\n", i, double(metricsOutArray[i << 1])*100.0 / double(MAX_DIFF),
-//        metricsOutArray[i << 1], metricsOutArray[i << 1] < same_thresh ? "  (D)" :
-//        metricsOutArray[i << 1] > diff_thresh ? "  (N)" :
-//        aLUT[i] == 2 ? "  (N)" : aLUT[i] == 1 ? "  (S)" :
-//        aLUT[i] == 0 ? "  (D)" : "", wasChosen(i, n) ? "  *" : "");
-//      OutputDebugString(buf);
-//    }
-//  }
-
-  if (activationReason == arInitial || (activationReason == arAllFramesReady && (intptr_t)*frameData != RetFrameIsReady)) {
-      vsapi->requestFrameFilter(ret, clip2, frameCtx);
-      *frameData = (void *)RetFrameIsReady;
+  if (requestChosenFrame(activationReason, frameData, ret, frameCtx))
       return nullptr;
-  }
 
-  const VSFrameRef *src = vsapi->getFrameFilter(ret, clip2, frameCtx);
-
-  if (display)
+  if (debug)
   {
-    VSFrameRef *dst = vsapi->copyFrame(src, core);
-    vsapi->freeFrame(src);
-
-#define SZ 160
-    char buf[SZ] = { 0 };
-
-    std::string text = "TDecimate " VERSION " by tritical\n";
-
-    snprintf(buf, SZ, "Mode: 7  Rate = %3.6f\n", rate);
-    text += buf;
-    snprintf(buf, SZ, "inframe = %d  useframe = %d  chosen = %d\n", n, ret, chosen);
-    text += buf;
-    snprintf(buf, SZ, "p = %d  c1 = %d  c2 = %d  n = %d\n", prev_f,
+    logInfo(vsapi, vscore, "TDecimate:  ------------------------------------------");
+    logInfo(vsapi, vscore, "TDecimate:  inframe = {}  useframe = {}  chosen = {}", n, ret, chosen);
+    logInfo(vsapi, vscore, "TDecimate:  prev = {}  curr1 = {}  curr2 = {}  next = {}", prev_f,
       curr1_f, curr2_f, next_f);
-    text += buf;
-    snprintf(buf, SZ, "dt = %3.2f  %" PRIu64 "  vt = %3.2f  %" PRIu64 "\n", dupThresh, same_thresh,
-      vidThresh, diff_thresh);
-    text += buf;
-
     for (int i = std::max(0, ret - 3); i <= std::min(ret + 3, nfrms); ++i)
     {
-      snprintf(buf, SZ, "%d:  %3.2f  %" PRIu64 "%s%s\n", i, double(metricsOutArray[i << 1])*100.0 / double(MAX_DIFF),
+      logInfo(vsapi, vscore, "TDecimate:  {}:  {:3.2f}  {}{}{}", i,
+        double(metricsOutArray[i << 1])*100.0 / double(MAX_DIFF),
         metricsOutArray[i << 1], metricsOutArray[i << 1] < same_thresh ? "  (D)" :
         metricsOutArray[i << 1] > diff_thresh ? "  (N)" :
         aLUT[i] == 2 ? "  (N)" : aLUT[i] == 1 ? "  (S)" :
         aLUT[i] == 0 ? "  (D)" : "", wasChosen(i, n) ? "  *" : "");
-    text += buf;
     }
-#undef SZ
-
-    VSMap *props = vsapi->getFramePropsRW(dst);
-    vsapi->propSetData(props, PROP_TDecimateDisplay, text.c_str(), text.size(), paReplace);
-
-    return dst;
   }
-  return src;
+
+  std::string body;
+  if (display)
+  {
+
+    body += std::format("Mode: 7  Rate = {:3.6f}\n", rate);
+    body += std::format("inframe = {}  useframe = {}  chosen = {}\n", n, ret, chosen);
+    body += std::format("p = {}  c1 = {}  c2 = {}  n = {}\n", prev_f,
+      curr1_f, curr2_f, next_f);
+    body += std::format("dt = {:3.2f}  {}  vt = {:3.2f}  {}\n", dupThresh, same_thresh,
+      vidThresh, diff_thresh);
+
+    for (int i = std::max(0, ret - 3); i <= std::min(ret + 3, nfrms); ++i)
+    {
+      body += std::format("{}:  {:3.2f}  {}{}{}\n", i, double(metricsOutArray[i << 1])*100.0 / double(MAX_DIFF),
+        metricsOutArray[i << 1], metricsOutArray[i << 1] < same_thresh ? "  (D)" :
+        metricsOutArray[i << 1] > diff_thresh ? "  (N)" :
+        aLUT[i] == 2 ? "  (N)" : aLUT[i] == 1 ? "  (S)" :
+        aLUT[i] == 0 ? "  (D)" : "", wasChosen(i, n) ? "  *" : "");
+    }
+  }
+  return chosenFrameWithDisplay(ret, frameCtx, core, body);
 }
 
 bool TDecimate::wasChosen(int i, int n)

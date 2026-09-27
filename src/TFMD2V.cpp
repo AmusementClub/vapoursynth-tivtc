@@ -3,8 +3,8 @@
 **
 **   TIVTC includes a field matching filter (TFM) and a decimation
 **   filter (TDecimate) which can be used together to achieve an
-**   IVTC or for other uses. TIVTC currently supports 8 bit planar YUV and
-**   YUY2 colorspaces.
+**   IVTC or for other uses. TIVTC supports 8-16 bit planar YUV
+**   (4:4:4, 4:2:2 and 4:2:0).
 **
 **   Copyright (C) 2004-2008 Kevin Stone, additional work (C) 2020 pinterf
 **
@@ -24,8 +24,27 @@
 */
 
 #include <cstring>
+#include <string>
 #include <memory>
 #include "TFM.h"
+
+// fgets() stops at the buffer size and leaves the remainder to be read as though it were a fresh
+// line. For a d2v data line that is silent corruption: the continuation starts with a hex digit,
+// so isD2VFlagChar() accepts it as another data line and skipD2VHeaderFields() then eats its first
+// tokens as header fields, dropping real flag bytes and misaligning everything after. Read whole
+// logical lines instead, however long they are. The trailing newline is kept so callers that echo
+// the line back out reproduce the file exactly.
+static bool readD2VLine(FILE *f, std::string &line)
+{
+  line.clear();
+  char buf[1024];
+  while (fgets(buf, sizeof(buf), f) != nullptr)
+  {
+    line += buf;
+    if (line.back() == '\n') return true;
+  }
+  return !line.empty();
+}
 
 void TFM::parseD2V()
 {
@@ -41,16 +60,14 @@ void TFM::parseD2V()
     else if (error == 3) throw TIVTCError("TFM:  malloc failure (d2v)!");
     return;
   }
-//  if (debug)
-//  {
-//    sprintf(buf, "TFM:  successfully opened specified d2v file.");
-//    OutputDebugString(buf);
-//    if (D2Vformat > 9) sprintf(buf, "TFM:  newest style (dgindex 1.2+) d2v detected.\n");
-//    else if (D2Vformat > 3) sprintf(buf, "TFM:  new style (dgindex 1.0+) d2v detected.\n");
-//    else if (D2Vformat > 0) sprintf(buf, "TFM:  new style (dvd2avidg 1.2+) d2v detected.\n");
-//    else sprintf(buf, "TFM:  old style (dvd2avi 1.76 or 1.77) d2v detected.\n");
-//    OutputDebugString(buf);
-//  }
+  if (debug)
+  {
+    logInfo(vsapi, vscore, "TFM:  successfully opened specified d2v file.");
+    logInfo(vsapi, vscore, "TFM:  {} d2v detected.",
+      D2Vformat > 9 ? "newest style (dgindex 1.2+)" :
+      D2Vformat > 3 ? "new style (dgindex 1.0+)" :
+      D2Vformat > 0 ? "new style (dvd2avidg 1.2+)" : "old style (dvd2avi 1.76 or 1.77)");
+  }
   error = D2V_find_and_correct(valIn, found, tff);
   if (error != 0 || tff == -1)
   {
@@ -63,21 +80,15 @@ void TFM::parseD2V()
   {
     order = tff;
     if (field == -1) field = tff;
-//    if (debug)
-//    {
-//      sprintf(buf, "TFM:  auto detected field order from d2v is %s.\n", order == 1 ? "TFF" : "BFF");
-//      OutputDebugString(buf);
-//    }
+    if (debug)
+      logInfo(vsapi, vscore, "TFM:  auto detected field order from d2v is {}.",
+        order == 1 ? "TFF" : "BFF");
   }
   else if (order != tff)
     throw TIVTCError("TFM:  the field order of the d2v does not match the user specified field order!");
   if (!found)
   {
-//    if (debug)
-//    {
-//      sprintf(buf, "TFM:  no errors found in d2v.\n");
-//      OutputDebugString(buf);
-//    }
+    if (debug) logInfo(vsapi, vscore, "TFM:  no errors found in d2v.");
     if (flags != 3)
     {
       if (trimIn.size())
@@ -104,7 +115,7 @@ void TFM::parseD2V()
     }
     return;
   }
-  error = D2V_get_output_filename(wfile);
+  error = D2V_get_output_filename(wfile, sizeof(wfile));
   if (error != 0)
   {
     throw TIVTCError("TFM:  could not obtain output d2v filename!");
@@ -122,12 +133,35 @@ void TFM::parseD2V()
     "          in the same directory as the original d2v file.");
 }
 
+// A d2v data line begins with a fixed run of space separated header fields -- how many depends on
+// the d2v version -- followed by the per-frame flag bytes. Return a pointer to the first flag byte.
+static char *skipD2VHeaderFields(char *p, int D2Vformat)
+{
+  while (*p && *p++ != ' ');
+  while (*p && *p++ != ' ');
+  if (D2Vformat > 9) while (*p && *p++ != ' ');
+  while (*p && *p++ != ' ');
+  if (D2Vformat > 0)
+  {
+    while (*p && *p++ != ' ');
+    while (*p && *p++ != ' ');
+    if (D2Vformat > 18)
+      while (*p && *p++ != ' ');
+  }
+  return p;
+}
+
+// The flag bytes are printed as hex, but the original range check is this loose: '0' through 'z'.
+static inline bool isD2VFlagChar(int c)
+{
+  return c > 47 && c < 123;
+}
+
 int TFM::fillTrimArray(int frames)
 {
   trimArray.resize(frames, 1);
-//  if (trimArray == nullptr) return 1;
   int x, y, v;
-  char linein[81];
+  std::string linein;
   if (sscanf(trimIn.c_str(), "%d,%d", &x, &y) == 2)
   {
     if (x < 0 && abs(x) <= frames)
@@ -143,9 +177,10 @@ int TFM::fillTrimArray(int frames)
   {
     std::unique_ptr<FILE, decltype (&fclose)> f(tivtc_fopen(trimIn.c_str(), "r"), &fclose);
     if (f == nullptr) return 2;
-    while (fgets(linein, 80, f.get()) != nullptr)
+    while (readD2VLine(f.get(), linein))
     {
-      sscanf(linein, "%d,%d", &x, &y);
+      if (sscanf(linein.c_str(), "%d,%d", &x, &y) != 2)
+        continue;
       if (x < 0 && abs(x) <= frames)
         x = frames + x;
       if (y < 0 && abs(y) <= frames)
@@ -169,13 +204,14 @@ int TFM::D2V_find_and_correct(std::vector<int> &array, bool &found, int &tff) co
   found = false;
   tff = -1;
   int count = 1, sync = 0, f1, f2, fix, temp, change;
+  // The field order follows from the very first entry. This used to be derived inside the
+  // transition loop below, which starts at count = 1 and so never runs for a single-entry d2v
+  // (one frame of video) -- leaving tff at -1 and making the caller reject a file that plainly
+  // does have an entry. Only a genuinely empty array leaves tff unset now.
+  if (array[0] != 9)
+    tff = array[0] < 2 ? 0 : 1;
   while (array[count] != 9)
   {
-    if (tff == -1)
-    {
-      if (array[count - 1] < 2) tff = 0;
-      else tff = 1;
-    }
     fix = D2V_check_illegal(array[count - 1], array[count]);
     if (!fix)
     {
@@ -219,40 +255,46 @@ int TFM::D2V_find_and_correct(std::vector<int> &array, bool &found, int &tff) co
   return D2V_check_final(array);
 }
 
+// The two rule tables that map an illegal (a1, a2) rff/tff transition onto the field that has to
+// change. Each returns true when it recognised the pair. Their union is exactly the set
+// D2V_check_illegal accepts, so for any pair the caller should be fixing, one of them matches.
+static bool d2vFixTowardsGreater(int a1, int a2, int &f1, int &f2)
+{
+  if (a1 == 0 && a2 == 3) f2 = 0;
+  else if (a1 == 1 && a2 == 0) f1 = 0;
+  else if (a1 == 1 && a2 == 1) f1 = 0;
+  else if (a1 == 2 && a2 == 1) f2 = 2;
+  else if (a1 == 3 && a2 == 2) f1 = 2;
+  else if (a1 == 3 && a2 == 3) f1 = 2;
+  return f1 != f2;
+}
+
+static bool d2vFixTowardsLess(int a1, int a2, int &f1, int &f2)
+{
+  if (a1 == 0 && a2 == 2) f1 = 1;
+  else if (a1 == 0 && a2 == 3) f1 = 1;
+  else if (a1 == 1 && a2 == 0) f2 = 3;
+  else if (a1 == 2 && a2 == 0) f1 = 3;
+  else if (a1 == 2 && a2 == 1) f1 = 3;
+  else if (a1 == 3 && a2 == 2) f2 = 1;
+  return f1 != f2;
+}
+
+// sync picks which table is consulted first; the other is the fallback. This used to be a pair of
+// labels that jumped into each other, which looped forever if neither table matched -- it now
+// simply leaves f1 == f2 == -1 and change untouched, which the caller already treats as "no fix".
 void TFM::D2V_find_fix(int a1, int a2, int sync, int &f1, int &f2, int &change) const
 {
   f1 = f2 = -1;
   if (sync >= 0)
   {
-  greater_than:
-    if (a1 == 0 && a2 == 3) f2 = 0;
-    else if (a1 == 1 && a2 == 0) f1 = 0;
-    else if (a1 == 1 && a2 == 1) f1 = 0;
-    else if (a1 == 2 && a2 == 1) f2 = 2;
-    else if (a1 == 3 && a2 == 2) f1 = 2;
-    else if (a1 == 3 && a2 == 3) f1 = 2;
-    if (f1 != f2)
-    {
-      change = -1;
-      return;
-    }
-    goto less_than;
+    if (d2vFixTowardsGreater(a1, a2, f1, f2)) { change = -1; return; }
+    if (d2vFixTowardsLess(a1, a2, f1, f2)) { change = 1; return; }
   }
   else
   {
-  less_than:
-    if (a1 == 0 && a2 == 2) f1 = 1;
-    else if (a1 == 0 && a2 == 3) f1 = 1;
-    else if (a1 == 1 && a2 == 0) f2 = 3;
-    else if (a1 == 2 && a2 == 0) f1 = 3;
-    else if (a1 == 2 && a2 == 1) f1 = 3;
-    else if (a1 == 3 && a2 == 2) f2 = 1;
-    if (f1 != f2)
-    {
-      change = 1;
-      return;
-    }
-    goto greater_than;
+    if (d2vFixTowardsLess(a1, a2, f1, f2)) { change = 1; return; }
+    if (d2vFixTowardsGreater(a1, a2, f1, f2)) { change = -1; return; }
   }
 }
 
@@ -295,28 +337,44 @@ int TFM::D2V_check_final(const std::vector<int> &array) const
   return 0;
 }
 
+// The frame data begins somewhere after the "Location" line, but how many blank or other lines sit
+// in between is not something the format guarantees. Skip forward to the first line that actually
+// looks like data rather than assuming a fixed number.
+static bool seekToD2VData(FILE *f, std::string &line)
+{
+  while (readD2VLine(f, line))
+  {
+    if (!line.empty() && isD2VFlagChar(line[0])) return true;
+  }
+  return false;
+}
+
 int TFM::D2V_initialize_array(std::vector<int> &array, int &d2vtype, int &frames) const
 {
     std::unique_ptr<FILE, decltype (&fclose)> ind2v(nullptr, nullptr);
   if (array.size() != 0) { array.resize(0); }
-  int num = 0, num2 = 0, pass = 1, val, D2Vformat;
-  char line[1025], *p;
-pass2_start:
+  int num = 0, num2 = 0, pass = 1, D2Vformat = 0;
+  unsigned int val; // %x writes through an unsigned int*
+  std::string line;
+  char *p;
+  // pass 1 counts the flag bytes, pass 2 fills the array; the file is read twice
+  for (; pass <= 2; ++pass)
+  {
   ind2v = decltype (ind2v)(tivtc_fopen(d2v.c_str(), "r"), &fclose);
   if (ind2v == nullptr) return 1;
   if (pass == 2)
   {
     array.resize(num + 10, 9);
   }
-  fgets(line, 1024, ind2v.get());
+  if (!readD2VLine(ind2v.get(), line)) return 2;
   D2Vformat = 0;
-  if (strncmp(line, "DVD2AVIProjectFile", 18) != 0)
+  if (strncmp(line.c_str(), "DVD2AVIProjectFile", 18) != 0)
   {
-    if (strncmp(line, "DGIndexProjectFile", 18) != 0)
+    if (strncmp(line.c_str(), "DGIndexProjectFile", 18) != 0)
     {
       return 2;
     }
-    sscanf(line, "DGIndexProjectFile%d", &D2Vformat);
+    sscanf(line.c_str(), "DGIndexProjectFile%d", &D2Vformat);
     /* Disabled the check for newer formats
     if (D2Vformat > 14)
     {
@@ -327,33 +385,27 @@ pass2_start:
     */
     D2Vformat += 3;
   }
-  if (D2Vformat == 0) sscanf(line, "DVD2AVIProjectFile%d", &D2Vformat);
-  while (fgets(line, 1024, ind2v.get()) != nullptr)
+  if (D2Vformat == 0) sscanf(line.c_str(), "DVD2AVIProjectFile%d", &D2Vformat);
+  bool found_location = false;
+  while (readD2VLine(ind2v.get(), line))
   {
-    if (strncmp(line, "Location", 8) == 0) break;
+    if (strncmp(line.c_str(), "Location", 8) == 0) { found_location = true; break; }
   }
-  fgets(line, 1024, ind2v.get());
-  fgets(line, 1024, ind2v.get());
+  // Without a Location line and some data after it there is nothing to parse.
+  if (!found_location) return 2;
+  if (!seekToD2VData(ind2v.get(), line)) return 2;
   do
   {
-    p = line;
-    while (*p++ != ' ');
-    while (*p++ != ' ');
-    if (D2Vformat > 9) while (*p++ != ' ');
-    while (*p++ != ' ');
-    if (D2Vformat > 0)
-    {
-      while (*p++ != ' ');
-      while (*p++ != ' ');
-      if (D2Vformat > 18)
-        while (*p++ != ' ');
-    }
-    while (*p > 47 && *p < 123)
+    p = skipD2VHeaderFields(&line[0], D2Vformat);
+    while (isD2VFlagChar(*p))
     {
       if (pass == 1) ++num;
       else
       {
-        sscanf(p, "%x", &val);
+        // pass 1 sized the array; if the file changed underneath us between the two reads,
+        // stop rather than writing past the end
+        if (num2 >= (int)array.size()) break;
+        if (sscanf(p, "%x", &val) != 1) break;
         if (D2Vformat > 9)
         {
           if (D2Vformat > 10 && val == 0xFF) array[num2++] = 9;
@@ -362,11 +414,12 @@ pass2_start:
         }
         else array[num2++] = (val&~0x10);
       }
-      while (*p != ' ' && *p != '\n') p++;
+      while (*p && *p != ' ' && *p != '\n') p++;
+      if (!*p) break; // Do not advance beyond the terminating NUL.
       p++;
     }
-  } while ((fgets(line, 1024, ind2v.get()) != nullptr) && line[0] > 47 && line[0] < 123);
-  if (pass == 1) { pass++; goto pass2_start; }
+  } while (readD2VLine(ind2v.get(), line) && !line.empty() && isD2VFlagChar(line[0]));
+  }
   d2vtype = D2Vformat;
   frames = 0;
   int i = 0;
@@ -382,21 +435,23 @@ pass2_start:
 
 int TFM::D2V_write_array(const std::vector<int> &array, char wfile[]) const
 {
-  int num = 0, D2Vformat, val;
-  char line[1025], *p, tbuf[16];
+  int num = 0, D2Vformat;
+  unsigned int val; // %x writes through an unsigned int*
+  std::string line;
+  char *p, tbuf[16];
   std::unique_ptr<FILE, decltype (&fclose)> ind2v(tivtc_fopen(d2v.c_str(), "r"), &fclose);
   if (ind2v == nullptr) return 1;
   std::unique_ptr<FILE, decltype (&fclose)> outd2v(tivtc_fopen(wfile, "w"), &fclose);
   if (outd2v == nullptr) return 2;
-  fgets(line, 1024, ind2v.get());
+  if (!readD2VLine(ind2v.get(), line)) return 3;
   D2Vformat = 0;
-  if (strncmp(line, "DVD2AVIProjectFile", 18) != 0)
+  if (strncmp(line.c_str(), "DVD2AVIProjectFile", 18) != 0)
   {
-    if (strncmp(line, "DGIndexProjectFile", 18) != 0)
+    if (strncmp(line.c_str(), "DGIndexProjectFile", 18) != 0)
     {
       return 3;
     }
-    sscanf(line, "DGIndexProjectFile%d", &D2Vformat);
+    sscanf(line.c_str(), "DGIndexProjectFile%d", &D2Vformat);
     /* Disabled the check for newer formats
     if (D2Vformat > 14)
     {
@@ -407,32 +462,30 @@ int TFM::D2V_write_array(const std::vector<int> &array, char wfile[]) const
     */
     D2Vformat += 3;
   }
-  if (D2Vformat == 0) sscanf(line, "DVD2AVIProjectFile%d", &D2Vformat);
-  fputs(line, outd2v.get());
-  while (fgets(line, 1024, ind2v.get()) != nullptr)
+  if (D2Vformat == 0) sscanf(line.c_str(), "DVD2AVIProjectFile%d", &D2Vformat);
+  fputs(line.c_str(), outd2v.get());
+  bool found_location = false;
+  while (readD2VLine(ind2v.get(), line))
   {
-    fputs(line, outd2v.get());
-    if (strncmp(line, "Location", 8) == 0) break;
+    fputs(line.c_str(), outd2v.get());
+    if (strncmp(line.c_str(), "Location", 8) == 0) { found_location = true; break; }
   }
-  fgets(line, 1024, ind2v.get());
-  fputs(line, outd2v.get());
-  fgets(line, 1024, ind2v.get());
+  if (!found_location) return 3;
+  // Echo whatever sits between Location and the first data line, however much of it there is.
+  bool found_data = false;
+  while (readD2VLine(ind2v.get(), line))
+  {
+    if (!line.empty() && isD2VFlagChar(line[0])) { found_data = true; break; }
+    fputs(line.c_str(), outd2v.get());
+  }
+  if (!found_data) return 3;
+  bool have_line;
   do
   {
-    p = line;
-    while (*p++ != ' ');
-    while (*p++ != ' ');
-    if (D2Vformat > 9) while (*p++ != ' ');
-    while (*p++ != ' ');
-    if (D2Vformat > 0)
+    p = skipD2VHeaderFields(&line[0], D2Vformat);
+    while (isD2VFlagChar(*p))
     {
-      while (*p++ != ' ');
-      while (*p++ != ' ');
-      if (D2Vformat > 18)
-        while (*p++ != ' ');
-    }
-    while (*p > 47 && *p < 123)
-    {
+      if (num >= (int)array.size()) break;
       if (D2Vformat < 10)
       {
         while (*(p + 1) >= '0' && *(p + 1) <= '9') p++;
@@ -440,33 +493,45 @@ int TFM::D2V_write_array(const std::vector<int> &array, char wfile[]) const
       }
       else
       {
-        sscanf(p, "%x", &val);
+        if (sscanf(p, "%x", &val) != 1) break;
         if (array[num] != 9)
         {
           val &= ~0x03;
           val |= array[num++];
         }
-        sprintf(tbuf, "%x", val);
+        // Exactly two characters are written back, so the value has to be zero padded: "%x" of
+        // anything below 0x10 yields one digit, and tbuf[1] would then be the terminator, cutting
+        // the rest of the line off in the "fixed" d2v that gets written out.
+        snprintf(tbuf, sizeof(tbuf), "%02x", val);
         *p = tbuf[0]; ++p;
         *p = tbuf[1];
       }
-      while (*p != ' ' && *p != '\n') p++;
+      while (*p && *p != ' ' && *p != '\n') p++;
+      if (!*p) break; // Do not advance beyond the terminating NUL.
       p++;
     }
-    fputs(line, outd2v.get());
-  } while ((fgets(line, 1024, ind2v.get()) != nullptr) && line[0] > 47 && line[0] < 123);
-  fputs(line, outd2v.get());
-  while (fgets(line, 1024, ind2v.get()) != nullptr) fputs(line, outd2v.get());
+    fputs(line.c_str(), outd2v.get());
+    have_line = readD2VLine(ind2v.get(), line);
+  } while (have_line && !line.empty() && isD2VFlagChar(line[0]));
+  // At EOF "line" still holds the previous iteration's text, which the loop already wrote out;
+  // only echo it when fgets actually produced a new line.
+  if (have_line) fputs(line.c_str(), outd2v.get());
+  while (readD2VLine(ind2v.get(), line)) fputs(line.c_str(), outd2v.get());
   return 0;
 }
 
-int TFM::D2V_get_output_filename(char wfile[]) const
+int TFM::D2V_get_output_filename(char *wfile, size_t wfile_size) const
 {
   FILE *outd2v = nullptr;
+  // The suffix work below can grow the name by "-FIXED.d2v" plus up to "_10", so refuse
+  // anything that could not hold the result rather than running off the end of the buffer.
+  if (d2v.size() + 16 >= wfile_size) return 1;
   strcpy(wfile, d2v.c_str());
   char *p = wfile;
   while (*p != 0) p++;
-  while (*p != 46) p--;
+  char *const end = p;
+  while (p > wfile && *p != 46) p--;
+  if (*p != 46) p = end; // no extension: append instead of overwriting the whole name
   *p++ = '-'; *p++ = 'F'; *p++ = 'I'; *p++ = 'X'; *p++ = 'E'; *p++ = 'D';
   *p++ = '.'; *p++ = 'd'; *p++ = '2'; *p++ = 'v'; *p = 0;
   bool checking = true;
@@ -480,7 +545,7 @@ int TFM::D2V_get_output_filename(char wfile[]) const
       outd2v = nullptr;
       p = wfile;
       while (*p != 0) p++;
-      while (*p != 46) p--;
+      while (p > wfile && *p != 46) p--;
       if (inT == 1)
       {
         *p++ = '_'; *p++ = inT + '0'; *p++ = '.'; *p++ = 'd';
@@ -517,7 +582,6 @@ int TFM::D2V_fill_d2vfilmarray(const std::vector<int> &array, int frames)
   int i = 0, v, fields = 0, val, outpattern = 0;
   if (d2vfilmarray.size()) { d2vfilmarray.resize(0); }
   d2vfilmarray.resize(frames + 1, 0);
-//  if (d2vfilmarray == nullptr) return 1;
   while (array[i] != 9)
   {
     val = array[i];
@@ -555,17 +619,13 @@ int TFM::D2V_fill_d2vfilmarray(const std::vector<int> &array, int frames)
   }
   if (i == 0) return 0;
   d2vpercent = double(i - outpattern)*100.0 / double(i);
-//  if (debug)
-//  {
-//    sprintf(buf, "TFM:  d2vflags = %d  out_of_pattern = %d  (%3.1f%s FILM)\n", i, outpattern,
-//      d2vpercent, "%");
-//    OutputDebugString(buf);
-//  }
   if (flags == 0) d2vpercent = -20.0;
+  if (debug)
+    logInfo(vsapi, vscore, "TFM:  d2vflags = {}  out_of_pattern = {}  ({:3.1f}% FILM)", i, outpattern,
+      d2vpercent);
   if (trimIn.size() && trimArray.size())
   {
     std::vector<uint8_t> d2vt(vi->numFrames, 0);
-//    if (d2vt == nullptr) return 2;
     for (v = 0, i = 0; i <= nfrms && v < frames; ++v)
     {
       if (trimArray[v])
@@ -576,11 +636,6 @@ int TFM::D2V_fill_d2vfilmarray(const std::vector<int> &array, int frames)
     }
     d2vfilmarray.resize(0);
     d2vfilmarray.resize(vi->numFrames);
-//    if (d2vfilmarray == nullptr)
-//    {
-//      free(d2vt);
-//      return 3;
-//    }
     memcpy(d2vfilmarray.data(), d2vt.data(), vi->numFrames * sizeof(unsigned char));
     trimArray.resize(0);
   }
